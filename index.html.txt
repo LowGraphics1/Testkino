@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Кино вместе 🍿</title>
+<style>
+:root{--bg:#09090b;--card:#151519;--line:#2a2a31;--text:#f5f5f7;--muted:#9a9aa5;--accent:#ff3d81}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#21121a,#09090b 45%);color:var(--text);font:15px system-ui,-apple-system,sans-serif}
+.wrap{max-width:1050px;margin:auto;padding:22px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+h1{margin:0;font-size:25px}.pill{padding:7px 10px;border:1px solid var(--line);border-radius:999px;color:#bdbdc7;background:#111116}
+.card{background:rgba(21,21,25,.94);border:1px solid var(--line);border-radius:20px;padding:16px;box-shadow:0 12px 40px #0006}
+.controls{display:grid;grid-template-columns:130px 1fr auto auto;gap:9px;margin-bottom:12px}
+input,select,button{border:1px solid var(--line);background:#202026;color:var(--text);border-radius:11px;padding:12px;font:inherit}
+button{cursor:pointer;background:#fff;color:#111;font-weight:700;border:0}.accent{background:var(--accent);color:#fff}.muted{background:#292930;color:#fff}
+.player{aspect-ratio:16/9;background:#000;border-radius:15px;overflow:hidden}.player iframe{width:100%;height:100%;border:0}
+.bottom{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-top:14px}
+.panel{background:#111116;border:1px solid var(--line);border-radius:15px;padding:13px}.panel h3{margin:0 0 9px;font-size:14px}
+.room{font-size:18px;font-weight:800;letter-spacing:1px}.status{color:#aaa;font-size:13px;margin-top:7px}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row input{flex:1;min-width:180px}.hint{color:var(--muted);font-size:12px;line-height:1.5}
+.chat{height:180px;overflow-y:auto;background:#0b0b0e;border-radius:10px;padding:9px;margin-bottom:8px;display:flex;flex-direction:column;gap:6px;scroll-behavior:smooth}.msg{margin:0;word-break:break-word}.msg b{color:#ff8fb4}
+@media(max-width:700px){.controls{grid-template-columns:1fr 1fr}.controls input{grid-column:1/-1}.bottom{grid-template-columns:1fr}.wrap{padding:12px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>🍿 Кино вместе</h1><span class="pill" id="provider">—</span></div>
+  <div class="card">
+    <div class="controls">
+      <select id="service"><option value="auto">Авто</option><option value="youtube">YouTube</option><option value="rutube">RUTUBE</option><option value="vk">VK Видео</option></select>
+      <input id="url" placeholder="Вставь ссылку на видео">
+      <button onclick="loadVideo()">Загрузить</button>
+      <button class="accent" onclick="createRoom()">Создать комнату</button>
+    </div>
+    <div class="player"><iframe id="frame" allow="autoplay; encrypted-media; fullscreen; picture-in-picture; clipboard-write" allowfullscreen></iframe></div>
+    <div class="bottom">
+      <div class="panel">
+        <h3>Комната</h3>
+        <div class="row">
+          <input id="code" placeholder="Код комнаты">
+          <button class="muted" onclick="joinRoom()">Войти</button>
+          <button class="muted" onclick="copyRoom()">Скопировать</button>
+        </div>
+        <div class="status" id="status">Создай комнату и поделись кодом.</div>
+        <p class="hint">Улучшенная синхронизация сверяет таймлайн и автоматически выравнивает рассинхрон, если кто-то промотал или отстает.</p>
+      </div>
+      <div class="panel">
+        <h3>💬 Чат</h3>
+        <div class="chat" id="chat"></div>
+        <div class="row"><input id="message" placeholder="Написать..." onkeydown="if(event.key==='Enter')sendChat()"><button onclick="sendChat()">→</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+let peer=null, conn=null, host=false, provider=null, videoKey=null, yt=null, suppress=false, lastState=null;
+const $=id=>document.getElementById(id);
+function setStatus(s){$('status').innerHTML=s}
+
+const peerConfig = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ]
+  }
+};
+
+function parseVideo(raw, forced='auto'){
+  let u; try{u=new URL(raw.trim())}catch(e){return null}
+  const h=u.hostname.replace('www.','');
+  let p=forced;
+  if(p==='auto'){
+    if(h.includes('youtube.com')||h==='youtu.be')p='youtube';
+    else if(h.includes('rutube.ru'))p='rutube';
+    else if(h.includes('vk.com')||h.includes('vkvideo.ru'))p='vk';
+    else return null;
+  }
+  if(p==='youtube'){
+    let id=u.searchParams.get('v');
+    if(!id && h==='youtu.be') id=u.pathname.split('/')[1];
+    if(!id && u.pathname.includes('/shorts/')) id=u.pathname.split('/shorts/')[1].split('/')[0];
+    return id?{p,id}:null;
+  }
+  if(p==='rutube'){
+    let m=u.pathname.match(/(?:video|shorts)\/([a-zA-Z0-9]+)/);
+    if(!m && u.pathname.includes('/play/embed/'))m=u.pathname.match(/embed\/([a-zA-Z0-9]+)/);
+    return m?{p,id:m[1]}:null;
+  }
+  if(p==='vk'){
+    let m=u.pathname.match(/video(-?\d+)_([0-9]+)/);
+    if(m)return {p,oid:m[1],id:m[2],hash:u.searchParams.get('hash')||''};
+    if(h.includes('vkvideo.ru') && u.pathname.includes('/video_ext.php'))
+      return {p,oid:u.searchParams.get('oid'),id:u.searchParams.get('id'),hash:u.searchParams.get('hash')||''};
+  }
+  return null;
+}
+function makeSrc(v, t=0){
+  if(v.p==='youtube') return `https://www.youtube.com/embed/${v.id}?enablejsapi=1&autoplay=0&playsinline=1&origin=${encodeURIComponent(location.origin)}&start=${Math.floor(t)}`;
+  if(v.p==='rutube') return `https://rutube.ru/play/embed/${v.id}?t=${Math.floor(t)}`;
+  if(v.p==='vk') return `https://vkvideo.ru/video_ext.php?oid=${encodeURIComponent(v.oid)}&id=${encodeURIComponent(v.id)}${v.hash?'&hash='+encodeURIComponent(v.hash):''}&autoplay=0`;
+}
+function loadVideo(v){
+  if(!v){v=parseVideo($('url').value,$('service').value);if(!v){setStatus('Не понял ссылку. Нужна ссылка на YouTube, RUTUBE или VK Видео.');return}}
+  provider=v.p;videoKey=JSON.stringify(v);$('provider').textContent=v.p==='youtube'?'YouTube':v.p==='rutube'?'RUTUBE':'VK Видео';
+  $('frame').src=makeSrc(v,0);
+  if(v.p==='youtube') initYT();
+  setStatus('Видео загружено. '+(host?'Ты управляешь воспроизведением.':''));
+}
+function initYT(){
+  if(window.YT&&YT.Player){
+    yt=new YT.Player('frame',{events:{
+      onReady:()=>{},
+      onStateChange:e=>{
+        if(!suppress&&host&&(e.data===1||e.data===2||e.data===3)){
+          broadcastState(true);
+        }
+      }
+    }});
+  }
+}
+function createRoom(){
+  host=true; const id='cinema-'+Math.random().toString(36).slice(2,9); 
+  peer=new Peer(id, peerConfig);
+  peer.on('open',()=>{const code=id.slice(7);$('code').value=code;setStatus('Комната <b>'+code+'</b> создана. Передай код участнику.')});
+  peer.on('connection',c=>{conn=c;wire()});
+  peer.on('error',e=>setStatus('Ошибка соединения: '+e.type));
+}
+function joinRoom(){
+  const code=$('code').value.trim(); if(!code)return;
+  host=false;
+  peer=new Peer(undefined, peerConfig);
+  peer.on('open',()=>{
+    conn=peer.connect('cinema-'+code,{reliable:true});
+    wire();
+  });
+  peer.on('error',e=>setStatus('Ошибка соединения: '+e.type));
+}
+function wire(){
+  conn.on('open',()=>{
+    setStatus(host?'Участник подключился ❤️':'Ты в комнате ❤️');
+    if(host&&videoKey)conn.send({type:'video',v:JSON.parse(videoKey)});
+  });
+  conn.on('data',m=>{
+    if(m.type==='video'){videoKey=JSON.stringify(m.v);$('url').value='';loadVideo(m.v)}
+    if(m.type==='state')applyState(m);
+    if(m.type==='chat')addChat('Собеседник',m.text);
+  });
+  conn.on('close',()=>setStatus('Соединение закрыто.'));
+}
+function broadcastState(force=false){
+  if(!host||!conn||!conn.open||!videoKey)return;
+  const s=getState(); if(!s)return;
+  conn.send({type:'state',...s,ts:Date.now()});
+}
+function getState(){
+  if(provider==='youtube'&&yt&&yt.getCurrentTime)return {t:yt.getCurrentTime(),play:yt.getPlayerState()===1};
+  if(lastState)return {t:lastState.t||0,play:lastState.play||false};
+  return {t:0,play:false};
+}
+function applyState(m){
+  if(host) return; 
+  const latency=(Date.now()-(m.ts||Date.now()))/1000;
+  const target=Math.max(0,(m.t||0)+(m.play?latency:0));
+  suppress=true;
+  
+  if(provider==='youtube'&&yt&&yt.seekTo){
+    let cur=0;
+    try{cur=yt.getCurrentTime()||0;}catch(e){}
+    if(Math.abs(cur-target)>0.5){
+      yt.seekTo(target,true);
+    }
+    const pState=yt.getPlayerState();
+    if(m.play && pState!==1) yt.playVideo();
+    if(!m.play && pState===1) yt.pauseVideo();
+  }else if(provider==='rutube'){
+    sendR({type:'player:setCurrentTime',data:{time:target}});
+    sendR({type:m.play?'player:play':'player:pause',data:{}});
+  }else if(provider==='vk'){
+    frameMsg({type:'player:setCurrentTime',data:{time:target}});
+    frameMsg({type:m.play?'player:play':'player:pause',data:{}});
+  }
+  setTimeout(()=>suppress=false,400);
+}
+function sendR(x){$('frame').contentWindow.postMessage(JSON.stringify(x),'*')}
+function frameMsg(x){$('frame').contentWindow.postMessage(JSON.stringify(x),'*')}
+window.addEventListener('message',e=>{
+  let m;try{m=typeof e.data==='string'?JSON.parse(e.data):e.data}catch(_){return}
+  if(!m||!m.type)return;
+  if(m.type==='player:currentTime')lastState={...(lastState||{}),t:m.data?.time||0};
+  if(m.type==='player:changeState'){
+    lastState={...(lastState||{}),play:m.data?.state==='playing'};
+    if(host&&!suppress)broadcastState();
+  }
+});
+
+setInterval(()=>{if(host&&!suppress)broadcastState()},500);
+
+function copyRoom(){if($('code').value)navigator.clipboard?.writeText($('code').value).then(()=>setStatus('Код скопирован ❤️'))}
+
+function addChat(who,text){
+  const d=document.createElement('div');
+  d.className='msg';
+  d.innerHTML='<b>'+who+':</b> '+escapeHtml(text);
+  const chatBox=$('chat');
+  chatBox.appendChild(d);
+  chatBox.scrollTop=chatBox.scrollHeight;
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+function sendChat(){
+  const x=$('message').value.trim();if(!x)return;
+  addChat('Ты',x);
+  if(conn?.open)conn.send({type:'chat',text:x});
+  $('message').value='';
+}
+</script>
+<script>
+function onYouTubeIframeAPIReady(){
+  if(provider==='youtube') initYT();
+}
+</script>
+<script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
